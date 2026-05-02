@@ -1,0 +1,9 @@
+build/
+out/
+third_party/MinHook/
+third_party/imgui/
+third_party/json/
+third_party/DirectXTK/
+*.log
+.vs/
+CMakeUserPresets.json

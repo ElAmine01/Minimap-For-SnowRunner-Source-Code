@@ -1,0 +1,19 @@
+# ==========================================
+# BOUCLIER A TOKENS POUR CLAUDE CODE
+# ==========================================
+
+# Ignorer les dépendances géantes (Des millions de tokens économisés)
+third_party/
+
+# Ignorer les fichiers de compilation (Totalement inutiles pour l'IA)
+build/
+$dst/
+
+# Ignorer les bases de données Ghidra et les gros JSON
+.ghidra_proj/
+graphify-out/
+.graphify*
+
+# Ignorer les binaires et images de référence
+snowmap-minimap-gotyalarim/
+SnowMap/

@@ -1,0 +1,51 @@
+# SnowMap — Minimap Mod for SnowRunner
+
+An ASI proxy DLL mod (`dinput8.dll`) providing a real-time minimap overlay for SnowRunner (PC / Steam / Epic). It hooks into DirectX 11 to render a 4K satellite map or a shader-colorized splatmap using Dear ImGui, tracking the player's exact vehicle coordinates.
+
+![Platform](https://img.shields.io/badge/platform-Windows%20x64-blue)
+![Tech](https://img.shields.io/badge/tech-C%2B%2B%20%7C%20DX11%20%7C%20ImGui-green)
+![Input](https://img.shields.io/badge/input-Keyboard%20%7C%20XInput-orange)
+
+---
+
+## Technical Implementation (Context for AI/Devs)
+
+SnowRunner executable is protected by **Denuvo** (encrypted `.text` section, runtime vtable filling). Static offsets for code or instances are invalid. This mod relies entirely on robust runtime methods:
+
+- **Direct RAM Level Detection:** Bypasses I/O hooking entirely. Reads the active level string (e.g., `level_ru_02_02`) directly from the static `GameSession` manager pointer in RAM (`SnowRunner.exe + 0x2A4E038`).
+- **Map Textures (Cloud Cache):** Asynchronously downloads pre-assembled 4K map PNGs from an external CDN to a local `SnowMap/cache/` directory to bypass proprietary swizzled UI textures (`gfx.pak`).
+- **Zero-Hook Vehicle Tracking:** The D3D11 Constant Buffer hook has been eradicated. The mod uses a lightweight background thread to read the `Camera Body` and `Truck Control` directly from RAM using static pointer chains (e.g., `[SnowRunner.exe + 0x2A876C0]`).
+- **Static UV Math:** Exploits the engine's exact 1:2 meter-to-pixel ratio. The center of the 4K map is always `X=0, Z=0`, making GPU Xform matrix extraction completely obsolete.
+- **XInput Controller Support:** Fully supports Xbox and PlayStation controllers (via Steam Input / DS4Windows) natively for seamless minimap navigation and zooming.
+- **Overlay:** Uses MinHook on `IDXGISwapChain::Present` to draw a stylized, rotate-aware ImGui minimap completely independently of the game's internal render passes.
+
+---
+
+## Architecture
+
+```text
+game.exe
+ └─ dinput8.dll (Proxy)
+     └─ LoadLibrary("SnowMap.asi")
+         ├─ hooks/DXGIHook           -> IDXGISwapChain::Present (ImGui Render)
+         ├─ hooks/D3D11Hook          -> ID3D11Device::CreateTexture2D (Map sync signal)
+         ├─ hooks/MemoryReader       -> Async thread reading Static RAM pointers (Level, GPS, Yaw)
+         ├─ render/MinimapRenderer   -> Orchestrator (ImGui, UV Math, AddImageQuad Rotation, XInput)
+         └─ render/MapDownloader     -> WinHTTP CDN background downloader
+
+Build Instructions
+Requirements
+
+    Visual Studio 2022
+
+    CMake ≥ 3.20
+
+    Windows SDK
+
+Steps
+
+    Fetch dependencies (MinHook, imgui docking branch, DirectXTK, nlohmann/json) into third_party/.
+
+    Run build_release.bat (or use CMake directly).
+
+    Build artifacts (SnowMap.asi, dinput8.dll) will be generated in build/dist/.

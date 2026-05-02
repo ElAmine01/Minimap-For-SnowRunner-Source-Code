@@ -1,0 +1,12 @@
+; dinput8.dll export forwarding table.
+; We re-export the handful of symbols SnowRunner imports from DINPUT8.dll.
+; Forwarding is done at runtime via GetProcAddress (see dllmain.cpp),
+; so the .def only needs to expose the names so loaders see them.
+LIBRARY dinput8
+EXPORTS
+    DirectInput8Create        = Proxy_DirectInput8Create
+    DllCanUnloadNow           = Proxy_DllCanUnloadNow    PRIVATE
+    DllGetClassObject         = Proxy_DllGetClassObject  PRIVATE
+    DllRegisterServer         = Proxy_DllRegisterServer  PRIVATE
+    DllUnregisterServer       = Proxy_DllUnregisterServer PRIVATE
+    GetdfDIJoystick           = Proxy_GetdfDIJoystick

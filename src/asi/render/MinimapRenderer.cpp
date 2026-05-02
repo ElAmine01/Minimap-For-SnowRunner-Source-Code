@@ -1,0 +1,459 @@
+#define NOMINMAX
+#include "MinimapRenderer.h"
+#include "TextureLoader.h"
+#include "MapDownloader.h"
+#include "../core/Config.h"
+#include "../core/Globals.h"
+#include "../core/Logger.h"
+#include "../game/PlayerState.h"
+#include "../hooks/D3D11Hook.h"
+
+#include <windows.h>
+#include <Xinput.h>
+#include <shlobj.h> 
+#include <d3d11.h>
+#include <imgui.h>
+
+#include <algorithm>
+#include <cmath>
+#include <cstring>
+#include <string>
+#include <filesystem>
+#include <future>
+#include <chrono>
+#include <mutex>
+#include <atomic>
+
+namespace snowmap::render {
+namespace {
+
+LoadedTexture             g_satelliteTexture;
+bool                      g_cacheChecked   = false;
+ID3D11ShaderResourceView* g_capturedSRV    = nullptr;
+
+static std::future<LoadedTexture> g_loadFuture;
+
+static void FlushLoadFuture() {
+    if (!g_loadFuture.valid()) return;
+    g_loadFuture.wait();
+    LoadedTexture stale = g_loadFuture.get();
+    stale.Release();
+}
+
+static LoadedTexture      g_blipsTexture;
+static bool               g_blipsLoadAttempted = false;
+
+static LoadedTexture      g_arrowTexture;
+static bool               g_arrowLoadAttempted = false;
+
+static std::atomic<bool>  g_levelIdReady{false};
+static std::mutex         g_detectionMutex;
+static std::string        g_pendingLevelId;
+
+constexpr float kOffset90 = 1.57079632679f;
+
+void ProcessCloudCache() {
+    if (g_cacheChecked) return;
+    if (!g_levelIdReady.load(std::memory_order_acquire)) return;
+
+    if (g_loadFuture.valid()) {
+        if (g_loadFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+            LoadedTexture result = g_loadFuture.get();
+            if (result.Valid()) {
+                g_satelliteTexture.Release();
+                g_satelliteTexture = result;
+                g_cacheChecked = true;
+                G().minimapTextureLoaded.store(true, std::memory_order_release);
+            }
+        }
+        return;
+    }
+
+    std::string levelId;
+    {
+        std::lock_guard<std::mutex> lk(g_detectionMutex);
+        levelId = g_pendingLevelId;
+    }
+    if (levelId.empty()) return;
+
+    char exePath[MAX_PATH];
+    GetModuleFileNameA(nullptr, exePath, MAX_PATH);
+    char* last = strrchr(exePath, '\\');
+    if (last) *last = '\0';
+
+    std::string cacheDir = std::string(exePath) + "\\SnowMap\\cache";
+    CreateDirectoryA(cacheDir.c_str(), NULL);
+    std::string imagePath = cacheDir + "\\" + levelId + ".png";
+
+    auto startAsyncLoad = [&]() {
+        ID3D11Device* dev = G().device;
+        g_loadFuture = std::async(std::launch::async, LoadImageFromDisk, dev, imagePath);
+    };
+
+    if (std::filesystem::exists(imagePath)) {
+        startAsyncLoad();
+    } else {
+        if (!MapDownloader::IsDownloading() && !MapDownloader::IsFailed() && !MapDownloader::IsFinished()) {
+            MapDownloader::StartDownload(levelId, imagePath);
+        }
+        if (MapDownloader::IsFinished()) {
+            startAsyncLoad();
+        }
+    }
+}
+
+void RefreshCapture() {
+    ID3D11ShaderResourceView* fresh = hooks::AcquireMinimapSRV();
+    if (!fresh) return;
+
+    bool isOurSatellite = (g_satelliteTexture.Valid() && fresh == g_satelliteTexture.srv);
+    bool isSameAsCaptured = (g_capturedSRV && fresh == g_capturedSRV);
+
+    if (!isOurSatellite && !isSameAsCaptured) {
+        if (g_capturedSRV) g_capturedSRV->Release();
+        g_capturedSRV = fresh;
+        g_cacheChecked = false;
+        MapDownloader::Reset();
+    } else {
+        if (!isSameAsCaptured) {
+            if (g_capturedSRV) g_capturedSRV->Release();
+            g_capturedSRV = fresh;
+        }
+    }
+}
+
+void TryLoadBlips() {
+    if (g_blipsTexture.Valid() || g_blipsLoadAttempted) return;
+    g_blipsLoadAttempted = true;
+    char exe[MAX_PATH];
+    if (!GetModuleFileNameA(nullptr, exe, MAX_PATH)) return;
+    char* slash = strrchr(exe, '\\');
+    if (slash) *slash = '\0';
+    const auto& cfg = GetConfig();
+    g_blipsTexture = LoadImageFromDisk(G().device, std::string(exe) + "\\" + cfg.blips_png_path);
+}
+
+void TryLoadArrow() {
+    if (g_arrowTexture.Valid() || g_arrowLoadAttempted) return;
+    g_arrowLoadAttempted = true;
+    char exe[MAX_PATH];
+    if (!GetModuleFileNameA(nullptr, exe, MAX_PATH)) return;
+    char* slash = strrchr(exe, '\\');
+    if (slash) *slash = '\0';
+    g_arrowTexture = LoadImageFromDisk(G().device, std::string(exe) + "\\SnowMap\\arrow.png");
+}
+
+static char s_ramLevelId[64] = {};
+
+static bool SafeRead(uintptr_t addr, void* dst, size_t size) {
+    if (!addr) return false;
+    SIZE_T n = 0;
+    return ReadProcessMemory(GetCurrentProcess(),
+                             reinterpret_cast<LPCVOID>(addr), dst, size, &n)
+           && n == size;
+}
+
+static void PollLevelIdFromRam() {
+    static int s_tick = 0;
+    if ((s_tick++ % 60) != 0) return;
+
+    const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleA(nullptr));
+    if (!base) return;
+
+    uintptr_t session = 0;
+    if (!SafeRead(base + 0x2A4E038, &session, sizeof(session)) || !session) return;
+
+    char buf[16] = {};
+    if (!SafeRead(session + 0x18, buf, 16)) return;
+
+    char levelId[64] = {};
+
+    if (strncmp(buf, "level_", 6) == 0) {
+        strncpy(levelId, buf, 15);
+        levelId[15] = '\0';
+    } 
+    else {
+        uintptr_t heapPtr = *reinterpret_cast<uintptr_t*>(buf);
+        if (heapPtr < 0x10000) return; 
+        if (!SafeRead(heapPtr, levelId, 32)) return;
+        levelId[31] = '\0';
+        if (strncmp(levelId, "level_", 6) != 0) return;
+    }
+
+    if (strcmp(levelId, s_ramLevelId) != 0) {
+        memcpy(s_ramLevelId, levelId, sizeof(s_ramLevelId));
+        MinimapRenderer::OnLevelDetected(std::string(levelId));
+    }
+}
+
+static void PollCameraFromRam() {
+    static int  s_failTick = 0;
+    const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleA(nullptr));
+    if (!base) return;
+
+    uintptr_t r15_node = 0;
+    if (!SafeRead(base + 0x2A876C0, &r15_node, sizeof(r15_node)) || !r15_node) return;
+
+    uintptr_t camera_body = 0;
+    if (!SafeRead(r15_node + 0x08, &camera_body, sizeof(camera_body)) || !camera_body) return;
+
+    float pos[3];
+    if (!SafeRead(camera_body + 0xB0, pos, sizeof(pos))) return;
+    if (!std::isfinite(pos[0]) || !std::isfinite(pos[2])) return;
+
+    float fwd[3];
+    if (!SafeRead(camera_body + 0x20, fwd, sizeof(fwd))) return;
+
+    const float heading = std::atan2f(fwd[2], fwd[0]);
+    game::PlayerState::UpdateCamera(pos[0], pos[1], pos[2], heading);
+}
+
+ImVec2 AnchorToScreenPos(int pad_x, int pad_y, int size) {
+    ImGuiIO& io = ImGui::GetIO();
+    const float W = io.DisplaySize.x;
+    const float H = io.DisplaySize.y;
+    switch (GetConfig().anchor) {
+        case Config::TopLeft:     return ImVec2(float(pad_x), float(pad_y));
+        case Config::TopRight:    return ImVec2(W - size - pad_x, float(pad_y));
+        case Config::BottomLeft:  return ImVec2(float(pad_x), H - size - pad_y);
+        case Config::BottomRight: return ImVec2(W - size - pad_x, H - size - pad_y);
+    }
+    return ImVec2(float(pad_x), float(pad_y));
+}
+
+void ComputeUVRect(const game::PlayerSnapshot& snap, float zoom, ImVec2& uv0, ImVec2& uv1) {
+    const float world_w = g_satelliteTexture.width  * 0.5f;
+    const float world_h = g_satelliteTexture.height * 0.5f;
+    const float u = (snap.eye_world[0] / world_w) + 0.5f;
+    const float v = 0.5f - (snap.eye_world[2] / world_h); 
+
+    const float half = 0.5f / std::max(zoom, 0.01f);
+    uv0 = ImVec2(std::clamp(u - half, 0.f, 1.f), std::clamp(v - half, 0.f, 1.f));
+    uv1 = ImVec2(std::clamp(u + half, 0.f, 1.f), std::clamp(v + half, 0.f, 1.f));
+}
+
+ImVec2 ComputeUVCenter(const game::PlayerSnapshot& snap) {
+    const float world_w = g_satelliteTexture.width  * 0.5f;
+    const float world_h = g_satelliteTexture.height * 0.5f;
+    const float u = (snap.eye_world[0] / world_w) + 0.5f;
+    const float v = 0.5f - (snap.eye_world[2] / world_h);
+    return ImVec2(u, v);
+}
+
+void ReloadConfigFromDisk() {
+    char path[MAX_PATH];
+    if (Config::ResolveDefaultPath(path, MAX_PATH)) GetConfig().LoadFromFile(path);
+}
+
+static void PollInput() {
+    using clock = std::chrono::steady_clock;
+    using ms    = std::chrono::milliseconds;
+    Config& cfg = GetConfig();
+
+    static bool              s_toggleDown  = false;
+    static bool              s_reloadDown  = false;
+    static clock::time_point s_lastToggle{};
+    static clock::time_point s_lastReload{};
+    static clock::time_point s_lastZoomIn{};
+    static clock::time_point s_lastZoomOut{};
+
+    const auto now  = clock::now();
+    XINPUT_STATE state{};
+    const bool padConnected = (XInputGetState(0, &state) == ERROR_SUCCESS);
+
+    auto isActionDown = [&](int vk, uint16_t padBtn) {
+        const bool keyDown = (GetAsyncKeyState(vk & 0xFF) & 0x8000) != 0;
+        const bool padDown = padConnected && padBtn != 0 && (state.Gamepad.wButtons & padBtn) != 0;
+        return keyDown || padDown;
+    };
+
+    auto debouncedPress = [&](int vk, uint16_t padBtn, bool& wasDown, clock::time_point& last) {
+        const bool down = isActionDown(vk, padBtn);
+        bool fired = false;
+        if (down && !wasDown && now - last > ms(200)) {
+            fired = true; last = now;
+        }
+        wasDown = down;
+        return fired;
+    };
+
+    auto debouncedHold = [&](int vk, uint16_t padBtn, clock::time_point& last) {
+        if (isActionDown(vk, padBtn) && now - last > ms(200)) {
+            last = now; return true;
+        }
+        return false;
+    };
+
+    if (debouncedPress(cfg.toggle_key, cfg.pad_toggle_btn, s_toggleDown, s_lastToggle)) {
+        const bool vis = G().overlayVisible.load(std::memory_order_relaxed);
+        G().overlayVisible.store(!vis, std::memory_order_release);
+    }
+
+    if (debouncedPress(cfg.reload_key, cfg.pad_reload_btn, s_reloadDown, s_lastReload))
+        ReloadConfigFromDisk();
+
+    if (debouncedHold(cfg.zoom_in_key, cfg.pad_zoom_in_btn, s_lastZoomIn))
+        cfg.zoom = std::min(cfg.zoom + 0.5f, 150.0f);
+
+    if (debouncedHold(cfg.zoom_out_key, cfg.pad_zoom_out_btn, s_lastZoomOut))
+        cfg.zoom = std::max(cfg.zoom - 0.5f, 1.0f);
+}
+
+} // namespace
+
+void MinimapRenderer::Draw() {
+    PollInput();
+
+    if (!G().overlayVisible.load(std::memory_order_acquire)) return;
+
+    PollLevelIdFromRam();
+    PollCameraFromRam();
+
+    {
+        std::lock_guard<std::mutex> lk(g_detectionMutex);
+        if (g_pendingLevelId.empty() || g_pendingLevelId.find("main_menu") != std::string::npos) return;
+    }
+
+    RefreshCapture();
+    TryLoadBlips();
+    TryLoadArrow();
+    ProcessCloudCache();
+
+    const Config& cfg = GetConfig();
+    auto snap = game::PlayerState::Current();
+    ID3D11ShaderResourceView* srv = g_satelliteTexture.Valid() ? g_satelliteTexture.srv : g_capturedSRV;
+
+    if (!srv) {
+        if (cfg.draw_debug_window) {
+            ImGui::Begin("SnowMap Debug");
+            ImGui::TextColored(ImVec4(1,1,0,1), "Attente texture...");
+            ImGui::End();
+        }
+        return;
+    }
+
+    // BASELINE : Fenêtre rectangulaire selon les proportions de l'image
+    const int size_w = std::max(64, cfg.size_px);
+    const int size_h = (g_satelliteTexture.Valid() && g_satelliteTexture.width > 0)
+        ? std::max(64, size_w * g_satelliteTexture.height / g_satelliteTexture.width) : size_w;
+
+    ImGui::SetNextWindowPos(AnchorToScreenPos(cfg.position_x, cfg.position_y, size_w), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(float(size_w), float(size_h)), ImGuiCond_Always);
+    ImGui::SetNextWindowBgAlpha(cfg.opacity);
+
+    const ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+                                   ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoSavedSettings |
+                                   ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav |
+                                   ImGuiWindowFlags_NoInputs;
+
+    if (!snap.valid) {
+        ImGui::Begin("##SnowMapFallback", nullptr, flags);
+        ImGui::End();
+        return;
+    }
+
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.f, 0.f));
+    if (ImGui::Begin("##SnowMapMinimap", nullptr, flags)) {
+        const ImVec2 contentSz = ImGui::GetContentRegionAvail();
+        const ImVec2 wMin      = ImGui::GetWindowPos();
+        const ImVec2 wMax      = ImVec2(wMin.x + contentSz.x, wMin.y + contentSz.y);
+        ImDrawList*  dl        = ImGui::GetWindowDrawList();
+        ImGui::PushClipRect(wMin, wMax, true);
+
+        ImVec2 uv0(0.f, 0.f), uv1(1.f, 1.f);
+        ImVec2 uvCenter(0.5f, 0.5f);
+        if (g_satelliteTexture.Valid() && g_satelliteTexture.width > 0) {
+            ComputeUVRect(snap, cfg.zoom, uv0, uv1);
+            uvCenter = ComputeUVCenter(snap);
+        }
+
+        // rot : angle de rotation des UVs de la carte.
+        // +kOffset90 aligne heading=π/2 (nord) sur rot=0 → pas de rotation → nord reste en haut.
+        const float rot = -snap.heading_rad + kOffset90;
+
+        if (cfg.rotate_with_player) {
+            const ImVec2 p0 = wMin, p1 = ImVec2(wMax.x, wMin.y), p2 = wMax, p3 = ImVec2(wMin.x, wMax.y);
+            const ImVec2 t0(uv0.x, uv0.y), t1(uv1.x, uv0.y), t2(uv1.x, uv1.y), t3(uv0.x, uv1.y);
+
+            const float ca = cosf(rot);
+            const float sa = -sinf(rot);
+            auto rotUv = [&](const ImVec2& p) -> ImVec2 {
+                const float dx = p.x - uvCenter.x;
+                const float dy = p.y - uvCenter.y;
+                return ImVec2(uvCenter.x + dx * ca - dy * sa, uvCenter.y + dx * sa + dy * ca);
+            };
+
+            dl->AddImageQuad(reinterpret_cast<ImTextureID>(srv), p0, p1, p2, p3,
+                             rotUv(t0), rotUv(t1), rotUv(t2), rotUv(t3), IM_COL32_WHITE);
+        } else {
+            ImGui::Image(reinterpret_cast<ImTextureID>(srv), contentSz, uv0, uv1);
+        }
+
+        if (cfg.show_player_arrow) {
+            const float cx = wMin.x + contentSz.x * 0.5f;
+            const float cy = wMin.y + contentSz.y * 0.5f;
+            // +π corrige l'azimut de 180° sur la flèche sans toucher à la rotation de la carte.
+            constexpr float kPi = 3.14159265f;
+            const float a  = cfg.rotate_with_player ? kPi : rot + kPi;
+
+            if (g_arrowTexture.Valid()) {
+                const float half = 16.0f;
+                const float ca = cosf(a), sa = -sinf(a);
+                auto rotArrow = [&](float dx, float dy) -> ImVec2 {
+                    return ImVec2(cx + dx * ca - dy * sa, cy + dx * sa + dy * ca);
+                };
+                dl->AddImageQuad(reinterpret_cast<ImTextureID>(g_arrowTexture.srv),
+                                 rotArrow(-half, -half), rotArrow( half, -half),
+                                 rotArrow( half,  half), rotArrow(-half,  half),
+                                 ImVec2(0,0), ImVec2(1,0), ImVec2(1,1), ImVec2(0,1), IM_COL32_WHITE);
+            }
+        }
+
+        ImGui::PopClipRect();
+    }
+    ImGui::End();
+    ImGui::PopStyleVar();
+}
+
+void MinimapRenderer::OnConfigReloaded() {
+    ReloadConfigFromDisk();
+    FlushLoadFuture();
+    g_blipsTexture.Release();
+    g_blipsLoadAttempted = false;
+    g_arrowTexture.Release();
+    g_arrowLoadAttempted = false;
+    g_satelliteTexture.Release();
+    g_cacheChecked = false;
+    MapDownloader::Reset();
+}
+
+void MinimapRenderer::Shutdown() {
+    FlushLoadFuture();
+    g_satelliteTexture.Release();
+    g_cacheChecked = false;
+    {
+        std::lock_guard<std::mutex> lk(g_detectionMutex);
+        g_pendingLevelId.clear();
+    }
+    g_levelIdReady.store(false, std::memory_order_release);
+    if (g_capturedSRV) g_capturedSRV->Release();
+    g_blipsTexture.Release();
+    g_arrowTexture.Release();
+}
+
+void MinimapRenderer::OnLevelDetected(const std::string& levelId) {
+    if (levelId.empty()) return;
+    {
+        std::lock_guard<std::mutex> lk(g_detectionMutex);
+        if (g_pendingLevelId == levelId) return;
+        g_pendingLevelId = levelId;
+    }
+    g_cacheChecked = false;
+    g_levelIdReady.store(true, std::memory_order_release);
+    MapDownloader::Reset();
+    game::PlayerState::ResetOffsets();
+}
+
+ID3D11ShaderResourceView* MinimapRenderer::GetActiveMapSRV() { return g_satelliteTexture.srv; }
+
+} // namespace snowmap::render
