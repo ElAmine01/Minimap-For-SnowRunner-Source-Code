@@ -187,7 +187,6 @@ static void PollLevelIdFromRam() {
 }
 
 static void PollCameraFromRam() {
-    static int  s_failTick = 0;
     const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleA(nullptr));
     if (!base) return;
 
@@ -219,25 +218,6 @@ ImVec2 AnchorToScreenPos(int pad_x, int pad_y, int size) {
         case Config::BottomRight: return ImVec2(W - size - pad_x, H - size - pad_y);
     }
     return ImVec2(float(pad_x), float(pad_y));
-}
-
-void ComputeUVRect(const game::PlayerSnapshot& snap, float zoom, ImVec2& uv0, ImVec2& uv1) {
-    const float world_w = g_satelliteTexture.width  * 0.5f;
-    const float world_h = g_satelliteTexture.height * 0.5f;
-    const float u = (snap.eye_world[0] / world_w) + 0.5f;
-    const float v = 0.5f - (snap.eye_world[2] / world_h); 
-
-    const float half = 0.5f / std::max(zoom, 0.01f);
-    uv0 = ImVec2(std::clamp(u - half, 0.f, 1.f), std::clamp(v - half, 0.f, 1.f));
-    uv1 = ImVec2(std::clamp(u + half, 0.f, 1.f), std::clamp(v + half, 0.f, 1.f));
-}
-
-ImVec2 ComputeUVCenter(const game::PlayerSnapshot& snap) {
-    const float world_w = g_satelliteTexture.width  * 0.5f;
-    const float world_h = g_satelliteTexture.height * 0.5f;
-    const float u = (snap.eye_world[0] / world_w) + 0.5f;
-    const float v = 0.5f - (snap.eye_world[2] / world_h);
-    return ImVec2(u, v);
 }
 
 void ReloadConfigFromDisk() {
@@ -332,10 +312,9 @@ void MinimapRenderer::Draw() {
         return;
     }
 
-    // BASELINE : Fenêtre rectangulaire selon les proportions de l'image
+    // LE GPS EST TOUJOURS UN CARRÉ PARFAIT (Fini l'étirement !)
     const int size_w = std::max(64, cfg.size_px);
-    const int size_h = (g_satelliteTexture.Valid() && g_satelliteTexture.width > 0)
-        ? std::max(64, size_w * g_satelliteTexture.height / g_satelliteTexture.width) : size_w;
+    const int size_h = size_w;
 
     ImGui::SetNextWindowPos(AnchorToScreenPos(cfg.position_x, cfg.position_y, size_w), ImGuiCond_Always);
     ImGui::SetNextWindowSize(ImVec2(float(size_w), float(size_h)), ImGuiCond_Always);
@@ -360,20 +339,34 @@ void MinimapRenderer::Draw() {
         ImDrawList*  dl        = ImGui::GetWindowDrawList();
         ImGui::PushClipRect(wMin, wMax, true);
 
-        ImVec2 uv0(0.f, 0.f), uv1(1.f, 1.f);
         ImVec2 uvCenter(0.5f, 0.5f);
+        float half_u = 0.5f, half_v = 0.5f;
+
         if (g_satelliteTexture.Valid() && g_satelliteTexture.width > 0) {
-            ComputeUVRect(snap, cfg.zoom, uv0, uv1);
-            uvCenter = ComputeUVCenter(snap);
+            const float world_w = g_satelliteTexture.width  * 0.5f;
+            const float world_h = g_satelliteTexture.height * 0.5f;
+            uvCenter.x = (snap.eye_world[0] / world_w) + 0.5f;
+            uvCenter.y = 0.5f - (snap.eye_world[2] / world_h); 
+
+            // Compensation de l'Aspect Ratio (Annule l'étirement de l'image)
+            const float aspect = float(g_satelliteTexture.width) / float(g_satelliteTexture.height);
+            const float span_u = 1.0f / std::max(cfg.zoom, 0.01f);
+            const float span_v = span_u * aspect;
+            
+            half_u = span_u * 0.5f;
+            half_v = span_v * 0.5f;
         }
 
-        // rot : angle de rotation des UVs de la carte.
-        // +kOffset90 aligne heading=π/2 (nord) sur rot=0 → pas de rotation → nord reste en haut.
         const float rot = -snap.heading_rad + kOffset90;
+
+        // On calcule les 4 coins UV natifs (compensés)
+        const ImVec2 t0(uvCenter.x - half_u, uvCenter.y - half_v);
+        const ImVec2 t1(uvCenter.x + half_u, uvCenter.y - half_v);
+        const ImVec2 t2(uvCenter.x + half_u, uvCenter.y + half_v);
+        const ImVec2 t3(uvCenter.x - half_u, uvCenter.y + half_v);
 
         if (cfg.rotate_with_player) {
             const ImVec2 p0 = wMin, p1 = ImVec2(wMax.x, wMin.y), p2 = wMax, p3 = ImVec2(wMin.x, wMax.y);
-            const ImVec2 t0(uv0.x, uv0.y), t1(uv1.x, uv0.y), t2(uv1.x, uv1.y), t3(uv0.x, uv1.y);
 
             const float ca = cosf(rot);
             const float sa = -sinf(rot);
@@ -386,13 +379,15 @@ void MinimapRenderer::Draw() {
             dl->AddImageQuad(reinterpret_cast<ImTextureID>(srv), p0, p1, p2, p3,
                              rotUv(t0), rotUv(t1), rotUv(t2), rotUv(t3), IM_COL32_WHITE);
         } else {
+            // Mode sans rotation de la carte
+            ImVec2 uv0 = t0; // Top Left
+            ImVec2 uv1 = t2; // Bottom Right
             ImGui::Image(reinterpret_cast<ImTextureID>(srv), contentSz, uv0, uv1);
         }
 
         if (cfg.show_player_arrow) {
             const float cx = wMin.x + contentSz.x * 0.5f;
             const float cy = wMin.y + contentSz.y * 0.5f;
-            // +π corrige l'azimut de 180° sur la flèche sans toucher à la rotation de la carte.
             constexpr float kPi = 3.14159265f;
             const float a  = cfg.rotate_with_player ? kPi : rot + kPi;
 
