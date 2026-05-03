@@ -1,9 +1,31 @@
 @echo off
+setlocal
+
+set "SCRIPT_DIR=%~dp0"
+if exist "%SCRIPT_DIR%paths.local.bat" call "%SCRIPT_DIR%paths.local.bat"
 
 :: 1. Chemins des outils et fichiers
-set MSBUILD_PATH="C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\amd64\MSBuild.exe"
-:: On cible directement le projet .vcxproj pour éviter l'erreur MSB1008
-set PROJECT_PATH="C:\Users\jeuxv\Documents\snowmap\build\snowmap_asi.vcxproj"
+if not defined PROJECT_PATH set "PROJECT_PATH=%SCRIPT_DIR%build\snowmap_asi.vcxproj"
+
+if not defined MSBUILD_PATH (
+    for /f "delims=" %%I in ('where MSBuild.exe 2^>nul') do (
+        set "MSBUILD_PATH=%%I"
+        goto :msbuild_found
+    )
+)
+:msbuild_found
+
+if not defined MSBUILD_PATH (
+    echo [build] MSBuild.exe introuvable. Definis MSBUILD_PATH dans paths.local.bat.
+    pause
+    exit /b 1
+)
+
+if not exist "%PROJECT_PATH%" (
+    echo [build] Projet introuvable: %PROJECT_PATH%
+    pause
+    exit /b 1
+)
 
 echo ===================================================
 echo   CLEAN AND REBUILD PROCESS (Direct Project)
@@ -15,11 +37,11 @@ echo ===================================================
 :: Pour être sûr de tout nettoyer, on peut utiliser deux commandes.
 
 echo [1/2] Cleaning old artifacts...
-%MSBUILD_PATH% %PROJECT_PATH% /t:Clean /p:Configuration=Release /p:Platform=x64 /m /nologo /v:minimal
+"%MSBUILD_PATH%" "%PROJECT_PATH%" /t:Clean /p:Configuration=Release /p:Platform=x64 /m /nologo /v:minimal
 
 echo.
 echo [2/2] Rebuilding project...
-%MSBUILD_PATH% %PROJECT_PATH% /p:Configuration=Release /p:Platform=x64 /m /nologo /v:minimal
+"%MSBUILD_PATH%" "%PROJECT_PATH%" /p:Configuration=Release /p:Platform=x64 /m /nologo /v:minimal
 
 echo.
 echo ===================================================

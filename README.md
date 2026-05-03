@@ -33,19 +33,24 @@ game.exe
          ├─ render/MinimapRenderer   -> Orchestrator (ImGui, UV Math, AddImageQuad Rotation, XInput)
          └─ render/MapDownloader     -> WinHTTP CDN background downloader
 
-Build Instructions
-Requirements
+```
 
-    Visual Studio 2022
+## Build Instructions
 
-    CMake ≥ 3.20
+### Requirements
 
-    Windows SDK
+- Visual Studio 2022
+- CMake >= 3.20
+- Windows SDK
 
-Steps
+### Steps
 
-    Fetch dependencies (MinHook, imgui docking branch, DirectXTK, nlohmann/json) into third_party/.
+1. Fetch dependencies (MinHook, imgui docking branch, DirectXTK, nlohmann/json) into third_party/.
+2. Run build_release.bat (or use CMake directly).
+3. Build artifacts (SnowMap.asi, dinput8.dll) will be generated in build/dist/.
 
-    Run build_release.bat (or use CMake directly).
+### Local Paths (Optional)
 
-    Build artifacts (SnowMap.asi, dinput8.dll) will be generated in build/dist/.
+If you need a custom MSBuild path or game install location, copy
+paths.local.bat.example to paths.local.bat and edit it. This local
+file is ignored by git so it will not affect the public repo.

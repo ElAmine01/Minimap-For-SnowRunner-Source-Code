@@ -2,9 +2,17 @@
 REM Deploy SnowMap.asi and dinput8.dll into the user's SnowRunner install.
 
 setlocal EnableDelayedExpansion
-set "GAME_BIN=C:\Program Files (x86)\Steam\steamapps\common\SnowRunner\Sources\Bin"
-REM Utilisation du chemin absolu que tu as fourni pour eviter tout bug de dossier
-set "BUILD_DIST=C:\Users\jeuxv\Documents\snowmap\build\dist"
+set "SCRIPT_DIR=%~dp0"
+if exist "%SCRIPT_DIR%paths.local.bat" call "%SCRIPT_DIR%paths.local.bat"
+
+if not defined GAME_BIN (
+    if defined ProgramFiles(x86) (
+        set "GAME_BIN=%ProgramFiles(x86)%\Steam\steamapps\common\SnowRunner\Sources\Bin"
+    ) else (
+        set "GAME_BIN=%ProgramFiles%\Steam\steamapps\common\SnowRunner\Sources\Bin"
+    )
+)
+if not defined BUILD_DIST set "BUILD_DIST=%SCRIPT_DIR%build\dist"
 
 if not exist "!GAME_BIN!\SnowRunner.exe" (
     echo [deploy] SnowRunner.exe introuvable dans : !GAME_BIN!
