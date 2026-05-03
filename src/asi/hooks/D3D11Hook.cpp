@@ -1,4 +1,6 @@
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #include "D3D11Hook.h"
 #include "../core/Logger.h"
 #include "../core/Globals.h"

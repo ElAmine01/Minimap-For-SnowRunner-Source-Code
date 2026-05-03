@@ -1,4 +1,6 @@
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #include "MinimapRenderer.h"
 #include "TextureLoader.h"
 #include "MapDownloader.h"

@@ -1,4 +1,6 @@
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #include "MapDownloader.h"
 #include "../core/Logger.h"
 
