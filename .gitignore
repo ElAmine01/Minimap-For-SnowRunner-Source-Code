@@ -6,4 +6,6 @@ third_party/json/
 third_party/DirectXTK/
 *.log
 .vs/
+tasks/todo.md
 CMakeUserPresets.json
+paths.local.bat
