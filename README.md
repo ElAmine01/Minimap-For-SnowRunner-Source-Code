@@ -54,3 +54,8 @@ game.exe
 If you need a custom MSBuild path or game install location, copy
 paths.local.bat.example to paths.local.bat and edit it. This local
 file is ignored by git so it will not affect the public repo.
+
+## ⚠️ Antivirus & False Positives
+
+Because this mod uses a proxy DLL (dinput8.dll), reads the game's RAM to track your truck, and connects to the internet to download the map, Windows Defender or your Antivirus may flag it as a virus (e.g., GameHack or Trojan).
+This is a 100% False Positive. The mod is completely open-source. To install it, you may need to add the SnowRunner Bin folder to your Antivirus exceptions/exclusions.
