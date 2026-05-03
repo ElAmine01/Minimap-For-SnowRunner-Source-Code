@@ -361,29 +361,32 @@ void MinimapRenderer::Draw() {
 
         const float rot = -snap.heading_rad + kOffset90;
 
-        // On calcule les 4 coins UV natifs (compensés)
-        const ImVec2 t0(uvCenter.x - half_u, uvCenter.y - half_v);
-        const ImVec2 t1(uvCenter.x + half_u, uvCenter.y - half_v);
-        const ImVec2 t2(uvCenter.x + half_u, uvCenter.y + half_v);
-        const ImVec2 t3(uvCenter.x - half_u, uvCenter.y + half_v);
+        // Rotate first in square space, then apply aspect correction on UV axes.
+        const ImVec2 q0(-1.0f, -1.0f);
+        const ImVec2 q1( 1.0f, -1.0f);
+        const ImVec2 q2( 1.0f,  1.0f);
+        const ImVec2 q3(-1.0f,  1.0f);
+
+        auto toUv = [&](const ImVec2& p) -> ImVec2 {
+            return ImVec2(uvCenter.x + p.x * half_u, uvCenter.y + p.y * half_v);
+        };
 
         if (cfg.rotate_with_player) {
             const ImVec2 p0 = wMin, p1 = ImVec2(wMax.x, wMin.y), p2 = wMax, p3 = ImVec2(wMin.x, wMax.y);
 
             const float ca = cosf(rot);
             const float sa = -sinf(rot);
-            auto rotUv = [&](const ImVec2& p) -> ImVec2 {
-                const float dx = p.x - uvCenter.x;
-                const float dy = p.y - uvCenter.y;
-                return ImVec2(uvCenter.x + dx * ca - dy * sa, uvCenter.y + dx * sa + dy * ca);
+            auto rotUnit = [&](const ImVec2& p) -> ImVec2 {
+                return ImVec2(p.x * ca - p.y * sa, p.x * sa + p.y * ca);
             };
 
             dl->AddImageQuad(reinterpret_cast<ImTextureID>(srv), p0, p1, p2, p3,
-                             rotUv(t0), rotUv(t1), rotUv(t2), rotUv(t3), IM_COL32_WHITE);
+                             toUv(rotUnit(q0)), toUv(rotUnit(q1)), toUv(rotUnit(q2)), toUv(rotUnit(q3)),
+                             IM_COL32_WHITE);
         } else {
             // Mode sans rotation de la carte
-            ImVec2 uv0 = t0; // Top Left
-            ImVec2 uv1 = t2; // Bottom Right
+            ImVec2 uv0 = toUv(q0); // Top Left
+            ImVec2 uv1 = toUv(q2); // Bottom Right
             ImGui::Image(reinterpret_cast<ImTextureID>(srv), contentSz, uv0, uv1);
         }
 
