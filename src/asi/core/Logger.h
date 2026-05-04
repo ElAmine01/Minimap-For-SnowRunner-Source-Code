@@ -1,7 +1,7 @@
 #pragma once
-//  Small, thread-safe logger that writes to <gamedir>/SnowMap/SnowMap.log.
-//  The game runs without a console, so we cannot rely on stdout.
-//  Keep it cheap — no formatting libs, just snprintf.
+/// Small, thread-safe logger that writes to <gamedir>/SnowMap/SnowMap.log.
+/// The game runs without a console, so we cannot rely on stdout.
+/// Keep it cheap: no formatting libs, just snprintf.
 
 #include <string>
 
@@ -9,11 +9,15 @@ namespace snowmap {
 
 enum class LogLevel { Info, Warn, Error, Debug };
 
+/// Thread-safe logger for on-disk diagnostics.
 class Logger
 {
 public:
-    static void Init();                          // creates log file, called once
+    /// Create the log file; safe to call once at startup.
+    static void Init();
+    /// Close the log file and release resources.
     static void Shutdown();
+    /// Log a formatted message with the given severity level.
     static void Log(LogLevel lvl, const char* fmt, ...);
 };
 

@@ -9,7 +9,7 @@ Ce document explique comment retrouver les adresses mémoires (Offsets) de SnowR
 1. **Le GameSession Manager (`Offset_Session`)**
    - Rôle : Contient le nom du niveau actuel en clair.
    - Pointeur : `[SnowRunner.exe + Offset_Session] + 0x18` -> `std::string` (ex: "level_ru_02_02").
-   - Ancien offset connu (Saison 13/14) : `0x2A4E038`
+   - Ancien offset connu (Saison 17) : `0x2A4E038`
 
 2. **Le Camera Node / R15 (`Offset_CameraNode`)**
    - Rôle : Pointeur racine vers la caméra active pour récupérer les coordonnées.

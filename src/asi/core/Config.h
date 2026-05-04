@@ -1,15 +1,16 @@
 #pragma once
-//  Runtime-tunable options, loaded from <gamedir>/SnowMap/options.json.
-//  Kept intentionally flat — it's literally a big struct.
-//
-//  We reload on demand (F6 by default) so users can iterate without
-//  restarting the game.
+/// Runtime-tunable options, loaded from <gamedir>/SnowMap/options.json.
+/// Kept intentionally flat; it is a simple POD-style struct.
+///
+/// We reload on demand (F6 by default) so users can iterate without
+/// restarting the game.
 
 #include <cstdint>
 #include <string>
 
 namespace snowmap {
 
+/// User-facing configuration for the minimap and input bindings.
 struct Config
 {
     // Minimap on-screen placement (pixels from chosen anchor).
@@ -48,15 +49,14 @@ struct Config
     // Debug.
     bool  draw_debug_window = false;
 
-    // Load / reload from disk. Returns false if the file is unreadable;
-    // the config is left untouched in that case.
+    /// Load/reload from disk. Returns false if the file is unreadable.
     bool LoadFromFile(const char* path);
 
-    // Resolves <gamedir>/SnowMap/options.json into `out` (MAX_PATH buffer).
+    /// Resolve <gamedir>/SnowMap/options.json into `out` (MAX_PATH buffer).
     static bool ResolveDefaultPath(char* out, size_t cap);
 };
 
-// Global singleton — one config per process is enough.
+/// Global singleton; one config per process is enough.
 Config& GetConfig();
 
 } // namespace snowmap

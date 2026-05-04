@@ -63,7 +63,7 @@ bool MapDownloader::DownloadInternal(const std::string& levelId, const std::stri
             DWORD statusCode = 0;
             DWORD dwSize = sizeof(statusCode);
             
-            // LA CORRECTION EST ICI : WINHTTP_HEADER_NAME_BY_INDEX
+            // Query numeric status code using WINHTTP_HEADER_NAME_BY_INDEX.
             WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &statusCode, &dwSize, WINHTTP_NO_HEADER_INDEX);
 
             if (statusCode == 200) {

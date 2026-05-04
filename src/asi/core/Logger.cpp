@@ -2,7 +2,7 @@
 
 #include <windows.h>
 #include <shlobj.h>
-#include <knownfolders.h> // <--- CRUCIAL pour FOLDERID_LocalAppData
+#include <knownfolders.h> // Required for FOLDERID_LocalAppData
 
 #include <cstdarg>
 #include <cstdio>
@@ -26,29 +26,29 @@ const char* LevelTag(LogLevel lvl)
     return "?????";
 }
 
-// Résout le chemin vers %LOCALAPPDATA%\SnowMap\SnowMap.log
+// Resolve the path to %LOCALAPPDATA%\SnowMap\SnowMap.log
 bool BuildLogPath(char out[MAX_PATH])
 {
     PWSTR localAppDataW = NULL;
-    // Récupère le chemin de %LOCALAPPDATA%
+    // Fetch the %LOCALAPPDATA% path.
     if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, NULL, &localAppDataW))) {
         std::wstring ws(localAppDataW);
         CoTaskMemFree(localAppDataW);
 
-        // On construit le chemin : %LOCALAPPDATA%\SnowMap\SnowMap.log
+        // Build the path: %LOCALAPPDATA%\SnowMap\SnowMap.log
         std::wstring dirW = ws + L"\\SnowMap";
         std::wstring fileW = dirW + L"\\SnowMap.log";
 
-        // On s'assure que le dossier existe
+        // Ensure the directory exists.
         CreateDirectoryW(dirW.c_str(), NULL);
 
-        // Conversion de la wstring en char array (UTF-8)
+        // Convert the wide string path to UTF-8.
         int size_needed = WideCharToMultiByte(CP_UTF8, 0, fileW.c_str(), (int)fileW.length(), NULL, 0, NULL, NULL);
         if (size_needed > 0) {
             std::string finalPath(size_needed, 0);
             WideCharToMultiByte(CP_UTF8, 0, fileW.c_str(), (int)fileW.length(), &finalPath[0], size_needed, NULL, NULL);
             
-            // CORRECTION ICI : Utilisation de la version avec la taille explicite pour éviter l'erreur C2660
+            // Use the size-explicit overload to avoid C2660 on MSVC.
             strcpy_s(out, MAX_PATH, finalPath.c_str());
             return true;
         }
@@ -68,7 +68,7 @@ void Logger::Init()
         return;
     }
 
-    // On ouvre le fichier en mode écriture ("w")
+    // Open the log file in write mode.
     g_logFile = _fsopen(path, "w", _SH_DENYWR);
     if (g_logFile) {
         std::setvbuf(g_logFile, nullptr, _IOLBF, 4096);

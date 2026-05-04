@@ -52,6 +52,7 @@ static std::atomic<bool>  g_levelIdReady{false};
 static std::mutex         g_detectionMutex;
 static std::string        g_pendingLevelId;
 
+// +90 deg to align engine heading with map UV north.
 constexpr float kOffset90 = 1.57079632679f;
 
 void ProcessCloudCache() {
@@ -108,6 +109,7 @@ void RefreshCapture() {
     ID3D11ShaderResourceView* fresh = hooks::AcquireMinimapSRV();
     if (!fresh) return;
 
+    // Ignore our own cached satellite texture; only adopt new game SRVs.
     bool isOurSatellite = (g_satelliteTexture.Valid() && fresh == g_satelliteTexture.srv);
     bool isSameAsCaptured = (g_capturedSRV && fresh == g_capturedSRV);
 
@@ -156,12 +158,14 @@ static bool SafeRead(uintptr_t addr, void* dst, size_t size) {
 }
 
 static void PollLevelIdFromRam() {
+    // Throttle RAM reads to avoid hammering the process each frame.
     static int s_tick = 0;
     if ((s_tick++ % 60) != 0) return;
 
     const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleA(nullptr));
     if (!base) return;
 
+    // GameSession pointer (static) holds a std::string with the level id.
     uintptr_t session = 0;
     if (!SafeRead(base + 0x2A4E038, &session, sizeof(session)) || !session) return;
 
@@ -170,6 +174,7 @@ static void PollLevelIdFromRam() {
 
     char levelId[64] = {};
 
+    // std::string uses SSO: inline buffer or a pointer to heap storage.
     if (strncmp(buf, "level_", 6) == 0) {
         strncpy(levelId, buf, 15);
         levelId[15] = '\0';
@@ -192,12 +197,14 @@ static void PollCameraFromRam() {
     const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleA(nullptr));
     if (!base) return;
 
+    // Camera node pointer chain: [base + Offset_CameraNode] -> node -> +0x08 -> CameraBody.
     uintptr_t r15_node = 0;
     if (!SafeRead(base + 0x2A876C0, &r15_node, sizeof(r15_node)) || !r15_node) return;
 
     uintptr_t camera_body = 0;
     if (!SafeRead(r15_node + 0x08, &camera_body, sizeof(camera_body)) || !camera_body) return;
 
+    // CameraBody layout: position at +0xB0, forward vector at +0x20.
     float pos[3];
     if (!SafeRead(camera_body + 0xB0, pos, sizeof(pos))) return;
     if (!std::isfinite(pos[0]) || !std::isfinite(pos[2])) return;
@@ -205,6 +212,7 @@ static void PollCameraFromRam() {
     float fwd[3];
     if (!SafeRead(camera_body + 0x20, fwd, sizeof(fwd))) return;
 
+    // Heading uses X/Z plane (Husky engine); Y is height.
     const float heading = std::atan2f(fwd[2], fwd[0]);
     game::PlayerState::UpdateCamera(pos[0], pos[1], pos[2], heading);
 }
@@ -314,7 +322,7 @@ void MinimapRenderer::Draw() {
         return;
     }
 
-    // LE GPS EST TOUJOURS UN CARRÉ PARFAIT (Fini l'étirement !)
+    // Force a square minimap to avoid any UI stretch.
     const int size_w = std::max(64, cfg.size_px);
     const int size_h = size_w;
 
@@ -348,9 +356,10 @@ void MinimapRenderer::Draw() {
             const float world_w = g_satelliteTexture.width  * 0.5f;
             const float world_h = g_satelliteTexture.height * 0.5f;
             uvCenter.x = (snap.eye_world[0] / world_w) + 0.5f;
+            // Flip Z so north stays up in texture UV space.
             uvCenter.y = 0.5f - (snap.eye_world[2] / world_h); 
 
-            // Compensation de l'Aspect Ratio (Annule l'étirement de l'image)
+            // Aspect ratio compensation to avoid texture stretching.
             const float aspect = float(g_satelliteTexture.width) / float(g_satelliteTexture.height);
             const float span_u = 1.0f / std::max(cfg.zoom, 0.01f);
             const float span_v = span_u * aspect;
@@ -359,6 +368,7 @@ void MinimapRenderer::Draw() {
             half_v = span_v * 0.5f;
         }
 
+        // Convert engine heading to UI rotation and align north.
         const float rot = -snap.heading_rad + kOffset90;
 
         // Rotate first in square space, then apply aspect correction on UV axes.
@@ -384,7 +394,7 @@ void MinimapRenderer::Draw() {
                              toUv(rotUnit(q0)), toUv(rotUnit(q1)), toUv(rotUnit(q2)), toUv(rotUnit(q3)),
                              IM_COL32_WHITE);
         } else {
-            // Mode sans rotation de la carte
+            // Non-rotating map mode.
             ImVec2 uv0 = toUv(q0); // Top Left
             ImVec2 uv1 = toUv(q2); // Bottom Right
             ImGui::Image(reinterpret_cast<ImTextureID>(srv), contentSz, uv0, uv1);

@@ -23,7 +23,7 @@ HRESULT WINAPI hkCreateTexture2D(ID3D11Device* pDevice, const D3D11_TEXTURE2D_DE
     HRESULT hr = g_origCreateTexture2D(pDevice, pDesc, pInitialData, ppTexture2D);
     
     if (SUCCEEDED(hr) && pDesc && ppTexture2D && *ppTexture2D) {
-        // Capture des textures carrées de grande taille (les cartes UI/Splatmaps du jeu)
+        // Capture large square UI textures (maps/splatmaps) for minimap use.
         if (pDesc->Width >= 1024 && pDesc->Width <= 4096 && pDesc->Height == pDesc->Width && pDesc->ArraySize == 1) {
             if (pDesc->BindFlags & D3D11_BIND_SHADER_RESOURCE) {
                 ID3D11ShaderResourceView* srv = nullptr;
