@@ -23,7 +23,7 @@ struct Config
     // Visual behaviour.
     float zoom           = 1.0f;   // 1.0 = fit, >1 zooms in
     float opacity        = 0.85f;
-    bool  rotate_with_player = false;
+    bool  rotate_with_player = true;
     bool  show_player_arrow  = true;
 
     // Input — virtual-key codes (VK_F5 etc.). Documented in options.json.

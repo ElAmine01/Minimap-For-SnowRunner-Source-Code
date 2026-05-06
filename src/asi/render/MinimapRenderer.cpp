@@ -193,27 +193,33 @@ static void PollLevelIdFromRam() {
     }
 }
 
-static void PollCameraFromRam() {
+static void PollVehicleFromRam() {
     const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleA(nullptr));
     if (!base) return;
 
-    // Camera node pointer chain: [base + Offset_CameraNode] -> node -> +0x08 -> CameraBody.
-    uintptr_t r15_node = 0;
-    if (!SafeRead(base + 0x2A876C0, &r15_node, sizeof(r15_node)) || !r15_node) return;
+    // Chain: [base + 0x2A876A8] -> truck_control -> [+0x08] -> tsn -> [+0x60] -> mid -> [+0x68] -> chassis_body
+    uintptr_t truck_control = 0;
+    if (!SafeRead(base + 0x2A876A8, &truck_control, sizeof(truck_control)) || !truck_control) return;
 
-    uintptr_t camera_body = 0;
-    if (!SafeRead(r15_node + 0x08, &camera_body, sizeof(camera_body)) || !camera_body) return;
+    uintptr_t tsn = 0;
+    if (!SafeRead(truck_control + 0x08, &tsn, sizeof(tsn)) || !tsn) return;
 
-    // CameraBody layout: position at +0xB0, forward vector at +0x20.
+    uintptr_t mid = 0;
+    if (!SafeRead(tsn + 0x60, &mid, sizeof(mid)) || !mid) return;
+
+    uintptr_t chassis = 0;
+    if (!SafeRead(mid + 0x68, &chassis, sizeof(chassis)) || !chassis) return;
+
+    // Husky body State C: forward vector at +0xB0, world position at +0xC0.
+    float fwd[3];
+    if (!SafeRead(chassis + 0xB0, fwd, sizeof(fwd))) return;
+
     float pos[3];
-    if (!SafeRead(camera_body + 0xB0, pos, sizeof(pos))) return;
+    if (!SafeRead(chassis + 0xC0, pos, sizeof(pos))) return;
     if (!std::isfinite(pos[0]) || !std::isfinite(pos[2])) return;
 
-    float fwd[3];
-    if (!SafeRead(camera_body + 0x20, fwd, sizeof(fwd))) return;
-
-    // Heading uses X/Z plane (Husky engine); Y is height.
-    const float heading = std::atan2f(fwd[2], fwd[0]);
+    // +0xB0 is the Right vector (local X), not Forward — add π/2 to recover truck heading.
+    const float heading = std::atan2f(fwd[2], fwd[0]) + kOffset90;
     game::PlayerState::UpdateCamera(pos[0], pos[1], pos[2], heading);
 }
 
@@ -297,7 +303,7 @@ void MinimapRenderer::Draw() {
     if (!G().overlayVisible.load(std::memory_order_acquire)) return;
 
     PollLevelIdFromRam();
-    PollCameraFromRam();
+    PollVehicleFromRam();
 
     {
         std::lock_guard<std::mutex> lk(g_detectionMutex);
@@ -369,7 +375,7 @@ void MinimapRenderer::Draw() {
         }
 
         // Convert engine heading to UI rotation and align north.
-        const float rot = -snap.heading_rad + kOffset90;
+        const float rot = -snap.heading_rad + kOffset90 + 3.14159265f;
 
         // Rotate first in square space, then apply aspect correction on UV axes.
         const ImVec2 q0(-1.0f, -1.0f);
@@ -385,7 +391,7 @@ void MinimapRenderer::Draw() {
             const ImVec2 p0 = wMin, p1 = ImVec2(wMax.x, wMin.y), p2 = wMax, p3 = ImVec2(wMin.x, wMax.y);
 
             const float ca = cosf(rot);
-            const float sa = -sinf(rot);
+            const float sa = sinf(rot);
             auto rotUnit = [&](const ImVec2& p) -> ImVec2 {
                 return ImVec2(p.x * ca - p.y * sa, p.x * sa + p.y * ca);
             };
@@ -404,7 +410,7 @@ void MinimapRenderer::Draw() {
             const float cx = wMin.x + contentSz.x * 0.5f;
             const float cy = wMin.y + contentSz.y * 0.5f;
             constexpr float kPi = 3.14159265f;
-            const float a  = cfg.rotate_with_player ? kPi : rot + kPi;
+            const float a = cfg.rotate_with_player ? 3.14159265f : -rot;
 
             if (g_arrowTexture.Valid()) {
                 const float half = 16.0f;
