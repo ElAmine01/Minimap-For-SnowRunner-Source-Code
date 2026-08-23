@@ -136,3 +136,89 @@ L'objectif est de retrouver la chaîne de pointeurs menant au corps physique du 
 **Action finale :**
 Mets à jour `src/asi/render/MinimapRenderer.cpp` dans la fonction `PollVehicleFromRam()` avec le nouvel offset (`SnowRunner.exe + NOUVEL_OFFSET`). Les offsets internes de la chaîne (`+0x08`, `+0x60`, `+0x68`) et du corps (`+0xB0` = Right vector, `+0xC0` = position) sont propres au moteur Husky et ne changent pas entre patches."
 ***
+
+---
+
+## Map blips: what works, what was tried, what is left
+
+*(English section — the discovery notes below were produced against build `SnowRunner.exe`
+image size 48242688, session global `+0x2A543C0`, TRUCK_CONTROL global `+0x2A8EDD8`.)*
+
+### Shipped
+
+`SnowMap/blips.png` is a uniform grid of square cells, 640x640 with 64px cells on the
+stock sheet: `0` player arrow, `1` fuel, `2` truck, `3` trailer, `4` waypoint pin,
+`5` cargo. Cell size, column count and the per-kind cell index all live in
+`options.json`, so a replacement sheet needs no rebuild. Only the player marker and
+mod-local waypoints are drawn today.
+
+Two traps that cost real time here, both now fixed:
+
+* `LoadImageFromDisk` flips images vertically because the satellite map wants north at
+  row 0. A sprite sheet must be loaded with `flip_vertically = false` or every cell
+  samples the wrong row. The atlas UV maths was correct the whole time.
+* Blip rotation. Screen up is world `+Z`, screen right is `+X`, and a truck at heading
+  `h` faces `(cos h, -sin h)` on screen. An up-pointing icon therefore needs a screen
+  rotation of `pi/2 - h`, and `DrawBlipIcon` rotates by `-a`, so `a = h - pi/2`. An
+  extra `pi` in that expression flips every icon 180 degrees.
+
+### Trucks, trailers, cargo: abandoned, and why
+
+The idea was: the player's chassis body is already resolved, its vtable identifies the
+class, so sweeping the heap for that one qword finds every other vehicle body. This does
+not work on this engine. Measured, on a loaded level with trailers present:
+
+```
+sweep 1 — 5 vtable hits, 1 bodies kept, 6523 MiB heap, 41859 ms
+sweep 2 — 11 vtable hits, 1 bodies kept, 6525 MiB heap, 15266 ms
+sweep 3 — 11 vtable hits, 1 bodies kept, 6526 MiB heap, 13297 ms
+```
+
+Only 5-11 objects in 6.5 GB share the chassis vtable and exactly one passes the shape
+test: the player's own truck. Trailers and other trucks do not share the class. The
+sweep also costs 13-42 s per pass, which is unusable regardless. Anyone retrying this
+needs a different route entirely — the level's object registry, not a vtable sweep.
+
+Note the anchor detail that is worth keeping: **Denuvo fills vtables at runtime onto the
+heap**, so the chassis body's vtable pointer is *not* inside the module's `.rdata`.
+Rejecting a vtable because it falls outside the module will silently break discovery.
+
+### In-game waypoints: unfinished, discovery done
+
+The game's own map waypoints are **not** read yet. What is already established:
+
+Save format, in `CompleteSave.cfg` (plain JSON, Steam cloud path
+`userdata/<id>/1465360/remote/`), keyed by level id:
+
+```json
+"waypoints": {
+  "level_us_09_01": [
+    {"point":{"x":4.5939602851867676,"y":0.21297536790370941,"z":-2.3439652919769287},
+     "modelHeightBounds":null,"type":0}
+  ]
+}
+```
+
+* **Coordinates are world units divided by exactly 150.** This is the single fact that
+  makes or breaks the search: a waypoint on a truck at world `(687.7, -352.1)` stores as
+  `(4.585, -2.347)`. Scanning for world-range floats will never find it.
+* `y` is terrain height at the marker, not truck height, so it implies a different scale
+  (~154) and must not be used as a consistency check. Only `x` and `z` are usable.
+* In memory the live vec3 sits at `object + 0x18`. Nearby are a `+/-19.30` pair
+  (`modelHeightBounds`) and a render-instance buffer repeating the vec3 at `0x10` stride.
+  Several stale copies of the value also exist; only one address updates when the player
+  moves the marker.
+
+What blocks it: no stable anchor was found. The containing object has no resolvable RTTI
+name, no module global points into its heap block (176 referencing qwords, all
+heap-to-heap), and a 4-level BFS from the session global did not reach it. Finishing this
+needs a proper multi-level reverse pointer scan plus validation across sessions and
+levels — a real pointer-scan job, not a quick lookup.
+
+Reproducing the find, with the game running and a waypoint placed on the truck:
+
+1. Read the truck world position through the existing chain
+   (`[SnowRunner.exe + truck_control_rva]` → `+0x08` → `+0x60` → `+0x68`, position at `+0xC0`).
+2. Scan `float` between `worldX/152` and `worldX/148`.
+3. Keep hits whose `+8` float lies in the matching `worldZ` band. That reduced ~75000
+   candidates to a handful, of which one tracks the marker.

@@ -17,7 +17,7 @@ void LoadedTexture::Release() {
 }
 
 
-LoadedTexture LoadImageFromDisk(ID3D11Device* dev, const std::string& path) {
+LoadedTexture LoadImageFromDisk(ID3D11Device* dev, const std::string& path, bool flip_vertically) {
     LoadedTexture out;
     if (!dev || path.empty()) return out;
 
@@ -68,7 +68,7 @@ LoadedTexture LoadImageFromDisk(ID3D11Device* dev, const std::string& path) {
     const UINT stride = w * 4;
 
     // ── Vertical flip: North moves to row 0 in memory ────────────────────────
-    {
+    if (flip_vertically) {
         std::vector<uint8_t> row(stride);
         for (UINT y = 0; y < h / 2; ++y) {
             uint8_t* top = px.data() + y * stride;

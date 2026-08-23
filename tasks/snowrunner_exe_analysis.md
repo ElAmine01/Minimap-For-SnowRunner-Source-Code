@@ -212,6 +212,6 @@ Suite aux tests de performance (le Constant Buffer causait du stuttering) et aux
 | Mécanisme | Comment notre mod interagit (V3 Final) |
 |---|---|
 | **Injection & Rendu** | `DINPUT8.dll` charge le `.asi`. `IDXGISwapChain::Present` est hooké pour dessiner l'overlay ImGui (Renderer AAA avec AddImageQuad). |
-| **Niveau courant** | **GameSession RAM** : Le mod déréférence le pointeur statique `[SnowRunner.exe + 0x2A4E038]` pour lire la string du niveau (ex: `level_ru_02_02`) en clair dans la RAM. Zéro hook I/O. |
+| **Niveau courant** | **GameSession RAM** : Le mod déréférence le pointeur statique `[SnowRunner.exe + 0x2A543C0]` pour lire la string du niveau (ex: `level_ru_02_02`) en clair dans la RAM. Zéro hook I/O. |
 | **Chargement Maps** | **Cloud Cache (MapDownloader)** : Requête WinHTTP asynchrone vers le CDN MapRunner. L'image 4K est mise en cache locale. L'origine géométrique (0,0) est toujours le centre exact du PNG. |
 | **Position & GPS** | **Static Pointer Chain** : Un thread lit le `Camera Body` ou le Véhicule via une chaîne statique `[SnowRunner.exe + 0x2A876C0] ->[+0x08]`. On extrait les floats `X,Y,Z` et on calcule le `Yaw` avec `atan2` sur le *Forward Vector*. Zéro interception GPU. Échec et Mat Denuvo. |

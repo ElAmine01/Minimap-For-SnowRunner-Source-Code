@@ -5,6 +5,8 @@
 
 #include <cstdint>
 
+#include "MemoryScan.h"
+
 namespace snowmap::game {
 
 /// Byte offsets inside the Husky structures the mod walks. These have been
@@ -21,6 +23,25 @@ inline constexpr uintptr_t kBodyWorldPosition = 0xC0;
 /// Longest level id that still fits the session object's inline buffer.
 inline constexpr uint32_t  kMaxInlineNameLength = 31;
 } // namespace layout
+
+/// Shape test for a candidate chassis body: a unit-length right vector and a
+/// finite world position inside the playable bounds. Shared with the entity
+/// tracker, which uses it to reject heap objects that merely share a vtable
+/// slot value.
+bool ChassisBodyLooksValid(const scan::RegionMap& regions, uintptr_t body);
+
+/// Same test against a live object, without a region snapshot.
+bool ChassisBodyLooksValid(uintptr_t body);
+
+/// Mangled RTTI class name of the TRUCK_CONTROL global, used as the anchor for
+/// entity discovery.
+const char* TruckControlClassName();
+
+/// Module base once the scanner worker has parsed the headers, else zero.
+uintptr_t ModuleBase();
+
+/// Module layout snapshot; `Valid()` is false until the worker has started.
+const scan::ModuleLayout& MainModule();
 
 /// Module-relative addresses of the globals, or zero while still unknown.
 struct GameOffsets

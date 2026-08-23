@@ -19,27 +19,22 @@
 #include <vector>
 
 namespace snowmap::game {
+
+using scan::kMinUserAddress;
+using scan::kPageSize;
+using scan::MaxUserAddress;
+using scan::ModuleLayout;
+using scan::RawCopy;
+using scan::Read;
+using scan::RegionMap;
+using scan::Section;
+
 namespace {
 
 /// MSVC mangled name of the class the active truck controller instantiates.
 constexpr char     kTruckControlClass[] = ".?AVTRUCK_CONTROL@combine@@";
 constexpr char     kLevelPrefix[]       = "level_";
 constexpr size_t   kLevelPrefixLength   = sizeof(kLevelPrefix) - 1;
-constexpr uintptr_t kMinUserAddress     = 0x10000;
-constexpr uintptr_t kPageSize           = 0x1000;
-
-/// Upper bound of the user address space. Must be queried, not guessed: the
-/// game module itself loads around 0x7FF7'xxxx'xxxx, above any round constant
-/// one is tempted to hardcode here.
-uintptr_t MaxUserAddress()
-{
-    static const uintptr_t cached = [] {
-        SYSTEM_INFO info{};
-        GetSystemInfo(&info);
-        return reinterpret_cast<uintptr_t>(info.lpMaximumApplicationAddress);
-    }();
-    return cached;
-}
 
 /// Rescan thresholds. The session global resolves even in the main menu, so it
 /// failing at all is a strong signal the module layout moved. The truck chain
@@ -50,169 +45,8 @@ constexpr DWORD    kRetryIntervalMs = 2000;
 /// One "still searching" line every 30 s while a global stays unresolved.
 constexpr uint32_t kHeartbeatPasses = 15;
 
-#if defined(_MSC_VER)
-/// A region can be freed between the readability check and the read itself.
-bool RawCopy(void* dst, const void* src, size_t bytes) noexcept
-{
-    __try {
-        std::memcpy(dst, src, bytes);
-        return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
-}
-#else
-bool RawCopy(void* dst, const void* src, size_t bytes) noexcept
-{
-    std::memcpy(dst, src, bytes);
-    return true;
-}
-#endif
-
-/// Snapshot of every committed, readable page in the process. Consulted before
-/// dereferencing a candidate pointer so the scan never touches a guard page.
-class RegionMap
-{
-public:
-    void Build()
-    {
-        m_ranges.clear();
-        MEMORY_BASIC_INFORMATION mbi{};
-        const uintptr_t limit  = MaxUserAddress();
-        uintptr_t       cursor = kMinUserAddress;
-        while (cursor < limit &&
-               VirtualQuery(reinterpret_cast<LPCVOID>(cursor), &mbi, sizeof(mbi)) == sizeof(mbi)) {
-            const uintptr_t start = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
-            const uintptr_t end   = start + mbi.RegionSize;
-            if (end <= cursor) break;
-            if (IsReadable(mbi)) {
-                if (!m_ranges.empty() && m_ranges.back().end == start) m_ranges.back().end = end;
-                else                                                   m_ranges.push_back({start, end});
-            }
-            cursor = end;
-        }
-    }
-
-    size_t Count() const { return m_ranges.size(); }
-
-    bool Readable(uintptr_t addr, size_t bytes) const
-    {
-        if (addr < kMinUserAddress || bytes == 0) return false;
-        const uintptr_t end = addr + bytes;
-        if (end < addr) return false;
-
-        auto it = std::upper_bound(m_ranges.begin(), m_ranges.end(), addr,
-                                   [](uintptr_t value, const Range& r) { return value < r.start; });
-        if (it == m_ranges.begin()) return false;
-        --it;
-        return addr >= it->start && end <= it->end;
-    }
-
-private:
-    struct Range { uintptr_t start; uintptr_t end; };
-
-    static bool IsReadable(const MEMORY_BASIC_INFORMATION& mbi)
-    {
-        if (mbi.State != MEM_COMMIT) return false;
-        if (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) return false;
-        constexpr DWORD kReadableFlags = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
-                                         PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE |
-                                         PAGE_EXECUTE_WRITECOPY;
-        return (mbi.Protect & kReadableFlags) != 0;
-    }
-
-    std::vector<Range> m_ranges;
-};
-
-template <typename T>
-bool Read(const RegionMap& regions, uintptr_t addr, T& out)
-{
-    if (!regions.Readable(addr, sizeof(T))) return false;
-    return RawCopy(&out, reinterpret_cast<const void*>(addr), sizeof(T));
-}
-
-struct Section
-{
-    uintptr_t start = 0;
-    uintptr_t end   = 0;
-
-    bool Contains(uintptr_t addr) const { return addr >= start && addr < end; }
-    bool Valid() const { return start != 0 && end > start; }
-};
-
-struct ModuleLayout
-{
-    uintptr_t base       = 0;
-    uint64_t  image_size = 0;
-    Section   rdata;
-    Section   data;
-
-    bool Valid() const { return base != 0 && rdata.Valid() && data.Valid(); }
-};
-
-bool ResolveModuleLayout(ModuleLayout& out)
-{
-    const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleA(nullptr));
-    if (!base) return false;
-
-    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
-    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return false;
-
-    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
-    if (nt->Signature != IMAGE_NT_SIGNATURE) return false;
-
-    out.base       = base;
-    out.image_size = nt->OptionalHeader.SizeOfImage;
-
-    const IMAGE_SECTION_HEADER* section = IMAGE_FIRST_SECTION(nt);
-    for (WORD i = 0; i < nt->FileHeader.NumberOfSections; ++i, ++section) {
-        char name[9] = {};
-        std::memcpy(name, section->Name, 8);
-
-        const Section bounds{base + section->VirtualAddress,
-                             base + section->VirtualAddress + section->Misc.VirtualSize};
-        if (std::strcmp(name, ".rdata") == 0)     out.rdata = bounds;
-        else if (std::strcmp(name, ".data") == 0) out.data  = bounds;
-    }
-    return out.Valid();
-}
-
-/// Layout of MSVC's RTTICompleteObjectLocator on x64.
-struct RttiCompleteObjectLocator
-{
-    uint32_t signature;
-    uint32_t offset;
-    uint32_t cd_offset;
-    uint32_t type_descriptor_rva;
-    uint32_t class_descriptor_rva;
-    uint32_t self_rva;
-};
-
-/// Walk vtable -> complete object locator -> type descriptor and compare the
-/// mangled class name. The name lives in .data and survives game patches.
-bool VTableClassNameMatches(const ModuleLayout& mod, const RegionMap& regions,
-                            uintptr_t vtable, const char* mangled)
-{
-    uintptr_t locator_addr = 0;
-    if (!Read(regions, vtable - sizeof(uintptr_t), locator_addr)) return false;
-    if (!mod.rdata.Contains(locator_addr)) return false;
-
-    RttiCompleteObjectLocator locator{};
-    if (!Read(regions, locator_addr, locator)) return false;
-    if (locator.signature != 1) return false;
-    if (locator.self_rva != static_cast<uint32_t>(locator_addr - mod.base)) return false;
-
-    const uintptr_t type_descriptor = mod.base + locator.type_descriptor_rva;
-    if (!mod.data.Contains(type_descriptor)) return false;
-
-    const size_t length = std::strlen(mangled);
-    char actual[128] = {};
-    if (length + 1 > sizeof(actual)) return false;
-    if (!regions.Readable(type_descriptor + 0x10, length + 1)) return false;
-    if (!RawCopy(actual, reinterpret_cast<const void*>(type_descriptor + 0x10), length + 1)) return false;
-
-    return actual[length] == '\0' && std::memcmp(actual, mangled, length) == 0;
-}
+using scan::ResolveModuleLayout;
+using scan::VTableClassNameMatches;
 
 /// Visit every plausible object pointer stored in .data. The callback returns
 /// true to stop the sweep.
@@ -266,23 +100,6 @@ uintptr_t ResolveChassisBody(const RegionMap& regions, uintptr_t truck_control)
     return body;
 }
 
-bool ChassisBodyLooksValid(const RegionMap& regions, uintptr_t body)
-{
-    float right[3]    = {};
-    float position[3] = {};
-    if (!Read(regions, body + layout::kBodyRightVector, right)) return false;
-    if (!Read(regions, body + layout::kBodyWorldPosition, position)) return false;
-
-    const float norm = std::sqrt(right[0] * right[0] + right[1] * right[1] + right[2] * right[2]);
-    if (!(norm > 0.99f && norm < 1.01f)) return false;
-
-    for (float value : position) {
-        if (!std::isfinite(value)) return false;
-    }
-    if (std::fabs(position[0]) > 20000.f || std::fabs(position[2]) > 20000.f) return false;
-    return position[0] != 0.f || position[2] != 0.f;
-}
-
 /// Counters kept so a failed pass can say *why* it failed in the log.
 struct ScanStats
 {
@@ -326,33 +143,7 @@ uintptr_t FindTruckControlByRtti(const ModuleLayout& mod, const RegionMap& regio
 /// still ships RTTI. Used to decide whether a miss from the RTTI sweep means
 /// "stripped" or merely "not spawned yet" — the latter must never fall back,
 /// because the shape test alone will happily match some other physics body.
-bool RttiNamePresentInData(const ModuleLayout& mod, const RegionMap& regions, const char* mangled)
-{
-    const size_t length = std::strlen(mangled);
-    uintptr_t    run_begin = 0;
-
-    for (uintptr_t page = mod.data.start & ~(kPageSize - 1); page < mod.data.end; page += kPageSize) {
-        const bool readable = regions.Readable(page, kPageSize);
-        if (readable && run_begin == 0) run_begin = std::max(page, mod.data.start);
-
-        const bool last = (page + kPageSize) >= mod.data.end;
-        if (run_begin != 0 && (!readable || last)) {
-            const uintptr_t run_end = std::min(readable ? mod.data.end : page, mod.data.end);
-            if (run_end > run_begin + length) {
-                const auto*  bytes = reinterpret_cast<const unsigned char*>(run_begin);
-                const size_t count = run_end - run_begin;
-                for (size_t i = 0; i + length <= count; ++i) {
-                    if (bytes[i] == static_cast<unsigned char>(mangled[0]) &&
-                        std::memcmp(bytes + i, mangled, length) == 0) {
-                        return true;
-                    }
-                }
-            }
-            run_begin = 0;
-        }
-    }
-    return false;
-}
+using scan::RttiNamePresentInData;
 
 /// Fallback for a future build with RTTI stripped: accept any global whose
 /// pointer chain lands on something shaped like a chassis body.
@@ -647,7 +438,53 @@ bool GraceExpired(std::atomic<uint64_t>& since, uint64_t grace_ms)
     return true;
 }
 
+/// Shared shape predicate. `position` is rejected at the exact origin because a
+/// freshly allocated, not-yet-simulated body reads as all zeroes.
+bool BodyShapeOk(const float right[3], const float position[3])
+{
+    const float norm = std::sqrt(right[0] * right[0] + right[1] * right[1] + right[2] * right[2]);
+    if (!(norm > 0.99f && norm < 1.01f)) return false;
+
+    for (int i = 0; i < 3; ++i) {
+        if (!std::isfinite(position[i])) return false;
+    }
+    if (std::fabs(position[0]) > 20000.f || std::fabs(position[2]) > 20000.f) return false;
+    return position[0] != 0.f || position[2] != 0.f;
+}
+
 } // namespace
+
+bool ChassisBodyLooksValid(const RegionMap& regions, uintptr_t body)
+{
+    float right[3]    = {};
+    float position[3] = {};
+    if (!Read(regions, body + layout::kBodyRightVector, right)) return false;
+    if (!Read(regions, body + layout::kBodyWorldPosition, position)) return false;
+    return BodyShapeOk(right, position);
+}
+
+bool ChassisBodyLooksValid(uintptr_t body)
+{
+    float right[3]    = {};
+    float position[3] = {};
+    if (!scan::SafeRead(body + layout::kBodyRightVector, right, sizeof(right))) return false;
+    if (!scan::SafeRead(body + layout::kBodyWorldPosition, position, sizeof(position))) return false;
+    return BodyShapeOk(right, position);
+}
+
+const char* TruckControlClassName() { return kTruckControlClass; }
+
+const scan::ModuleLayout& MainModule()
+{
+    static const scan::ModuleLayout layout = [] {
+        scan::ModuleLayout resolved;
+        scan::ResolveModuleLayout(resolved);
+        return resolved;
+    }();
+    return layout;
+}
+
+uintptr_t ModuleBase() { return MainModule().base; }
 
 void OffsetScanner::Start()
 {

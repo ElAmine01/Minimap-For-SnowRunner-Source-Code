@@ -17,6 +17,10 @@ struct LoadedTexture {
 };
 
 /// Load a PNG/JPG from disk into a D3D11 shader resource view.
-LoadedTexture LoadImageFromDisk(ID3D11Device* dev, const std::string& absolutePath);
+///
+/// `flip_vertically` exists for the satellite map, whose UV math wants north at
+/// row 0. Sprite sheets must be loaded unflipped or their cell rows move.
+LoadedTexture LoadImageFromDisk(ID3D11Device* dev, const std::string& absolutePath,
+                                bool flip_vertically = true);
 
 } // namespace snowmap::render
