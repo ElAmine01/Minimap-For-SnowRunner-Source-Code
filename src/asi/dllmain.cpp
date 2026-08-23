@@ -7,6 +7,7 @@
 #include "core/Logger.h"
 #include "core/Config.h"
 #include "core/Globals.h"
+#include "game/OffsetScanner.h"
 #include "hooks/HookManager.h"
 
 using namespace snowmap;
@@ -23,6 +24,8 @@ DWORD WINAPI ModAttach(LPVOID) {
         SM_WARN("Could not resolve config path.");
     }
 
+    game::OffsetScanner::Start();
+
     if (!hooks::InitHookEngine()) {
         SM_ERROR("Failed to initialize hook engine.");
         return 0;
@@ -38,6 +41,7 @@ DWORD WINAPI ModAttach(LPVOID) {
 }
 
 void ModDetach() {
+    game::OffsetScanner::Shutdown();
     hooks::ShutdownHookEngine();
     Logger::Shutdown();
 }

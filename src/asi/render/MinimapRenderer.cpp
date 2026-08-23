@@ -7,6 +7,7 @@
 #include "../core/Config.h"
 #include "../core/Globals.h"
 #include "../core/Logger.h"
+#include "../game/OffsetScanner.h"
 #include "../game/PlayerState.h"
 #include "../hooks/D3D11Hook.h"
 
@@ -18,6 +19,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <string>
 #include <filesystem>
@@ -157,35 +159,45 @@ static bool SafeRead(uintptr_t addr, void* dst, size_t size) {
            && n == size;
 }
 
+static bool ReadLevelId(uintptr_t session, char* out, size_t cap) {
+    uint32_t length = 0;
+    if (!SafeRead(session + game::layout::kSessionNameLength, &length, sizeof(length))) return false;
+    if (length < 6 || static_cast<size_t>(length) + 1 > cap) return false;
+
+    // Short ids live in the object's inline buffer; anything longer than the
+    // buffer would spill to heap storage the same slot then points at.
+    if (length <= game::layout::kMaxInlineNameLength) {
+        if (!SafeRead(session + game::layout::kSessionName, out, length + 1)) return false;
+    } else {
+        uintptr_t heap = 0;
+        if (!SafeRead(session + game::layout::kSessionName, &heap, sizeof(heap)) || !heap) return false;
+        if (!SafeRead(heap, out, length + 1)) return false;
+    }
+
+    out[cap - 1] = '\0';
+    return out[length] == '\0' && strncmp(out, "level_", 6) == 0;
+}
+
 static void PollLevelIdFromRam() {
     // Throttle RAM reads to avoid hammering the process each frame.
     static int s_tick = 0;
     if ((s_tick++ % 60) != 0) return;
 
-    const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleA(nullptr));
-    if (!base) return;
+    const uintptr_t global = game::OffsetScanner::SessionGlobal();
+    if (!global) return;
 
-    // GameSession pointer (static) holds a std::string with the level id.
     uintptr_t session = 0;
-    if (!SafeRead(base + 0x2A4E038, &session, sizeof(session)) || !session) return;
-
-    char buf[16] = {};
-    if (!SafeRead(session + 0x18, buf, 16)) return;
+    if (!SafeRead(global, &session, sizeof(session)) || !session) {
+        game::OffsetScanner::ReportSessionResult(false);
+        return;
+    }
 
     char levelId[64] = {};
-
-    // std::string uses SSO: inline buffer or a pointer to heap storage.
-    if (strncmp(buf, "level_", 6) == 0) {
-        strncpy(levelId, buf, 15);
-        levelId[15] = '\0';
-    } 
-    else {
-        uintptr_t heapPtr = *reinterpret_cast<uintptr_t*>(buf);
-        if (heapPtr < 0x10000) return; 
-        if (!SafeRead(heapPtr, levelId, 32)) return;
-        levelId[31] = '\0';
-        if (strncmp(levelId, "level_", 6) != 0) return;
+    if (!ReadLevelId(session, levelId, sizeof(levelId))) {
+        game::OffsetScanner::ReportSessionResult(false);
+        return;
     }
+    game::OffsetScanner::ReportSessionResult(true);
 
     if (strcmp(levelId, s_ramLevelId) != 0) {
         memcpy(s_ramLevelId, levelId, sizeof(s_ramLevelId));
@@ -194,29 +206,35 @@ static void PollLevelIdFromRam() {
 }
 
 static void PollVehicleFromRam() {
-    const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleA(nullptr));
-    if (!base) return;
+    const uintptr_t global = game::OffsetScanner::TruckControlGlobal();
+    if (!global) return;
 
-    // Chain: [base + 0x2A876A8] -> truck_control -> [+0x08] -> tsn -> [+0x60] -> mid -> [+0x68] -> chassis_body
+    // A null chain is expected in menus and in the garage, so only a loaded
+    // level counts as evidence that the offset itself went bad.
+    const bool levelActive = s_ramLevelId[0] != '\0' && !strstr(s_ramLevelId, "main_menu");
+    const auto fail = [levelActive] { game::OffsetScanner::ReportTruckResult(false, levelActive); };
+
+    // Chain: TruckControl -> [+0x08] -> tsn -> [+0x60] -> mid -> [+0x68] -> chassis_body
     uintptr_t truck_control = 0;
-    if (!SafeRead(base + 0x2A876A8, &truck_control, sizeof(truck_control)) || !truck_control) return;
+    if (!SafeRead(global, &truck_control, sizeof(truck_control)) || !truck_control) { fail(); return; }
 
     uintptr_t tsn = 0;
-    if (!SafeRead(truck_control + 0x08, &tsn, sizeof(tsn)) || !tsn) return;
+    if (!SafeRead(truck_control + game::layout::kTruckSimNode, &tsn, sizeof(tsn)) || !tsn) { fail(); return; }
 
     uintptr_t mid = 0;
-    if (!SafeRead(tsn + 0x60, &mid, sizeof(mid)) || !mid) return;
+    if (!SafeRead(tsn + game::layout::kSimNodeChild, &mid, sizeof(mid)) || !mid) { fail(); return; }
 
     uintptr_t chassis = 0;
-    if (!SafeRead(mid + 0x68, &chassis, sizeof(chassis)) || !chassis) return;
+    if (!SafeRead(mid + game::layout::kChildChassisBody, &chassis, sizeof(chassis)) || !chassis) { fail(); return; }
 
-    // Husky body State C: forward vector at +0xB0, world position at +0xC0.
     float fwd[3];
-    if (!SafeRead(chassis + 0xB0, fwd, sizeof(fwd))) return;
+    if (!SafeRead(chassis + game::layout::kBodyRightVector, fwd, sizeof(fwd))) { fail(); return; }
 
     float pos[3];
-    if (!SafeRead(chassis + 0xC0, pos, sizeof(pos))) return;
-    if (!std::isfinite(pos[0]) || !std::isfinite(pos[2])) return;
+    if (!SafeRead(chassis + game::layout::kBodyWorldPosition, pos, sizeof(pos))) { fail(); return; }
+    if (!std::isfinite(pos[0]) || !std::isfinite(pos[2])) { fail(); return; }
+
+    game::OffsetScanner::ReportTruckResult(true, levelActive);
 
     // +0xB0 is the Right vector (local X), not Forward — add π/2 to recover truck heading.
     const float heading = std::atan2f(fwd[2], fwd[0]) + kOffset90;
@@ -289,10 +307,10 @@ static void PollInput() {
         ReloadConfigFromDisk();
 
     if (debouncedHold(cfg.zoom_in_key, cfg.pad_zoom_in_btn, s_lastZoomIn))
-        cfg.zoom = std::min(cfg.zoom + 0.5f, 150.0f);
+        cfg.zoom = std::min(cfg.zoom + Config::kZoomStep, Config::kZoomMax);
 
     if (debouncedHold(cfg.zoom_out_key, cfg.pad_zoom_out_btn, s_lastZoomOut))
-        cfg.zoom = std::max(cfg.zoom - 0.5f, 1.0f);
+        cfg.zoom = std::max(cfg.zoom - Config::kZoomStep, Config::kZoomMin);
 }
 
 } // namespace
@@ -422,6 +440,23 @@ void MinimapRenderer::Draw() {
                                  rotArrow(-half, -half), rotArrow( half, -half),
                                  rotArrow( half,  half), rotArrow(-half,  half),
                                  ImVec2(0,0), ImVec2(1,0), ImVec2(1,1), ImVec2(0,1), IM_COL32_WHITE);
+            } else {
+                // arrow.png is optional; draw a vector marker so the player is
+                // always locatable. Tip points up when the map rotates with the
+                // player, otherwise it follows the heading.
+                const float theta = cfg.rotate_with_player ? 0.0f : -rot;
+                const float ct = cosf(theta), st = sinf(theta);
+                auto marker = [&](float dx, float dy) -> ImVec2 {
+                    return ImVec2(cx + dx * ct - dy * st, cy + dx * st + dy * ct);
+                };
+                const ImVec2 tip   = marker( 0.0f, -13.0f);
+                const ImVec2 left  = marker(-9.0f,   9.0f);
+                const ImVec2 right = marker( 9.0f,   9.0f);
+                const ImVec2 notch = marker( 0.0f,   4.0f);
+
+                dl->AddTriangleFilled(tip, right, notch, IM_COL32(235, 64, 52, 255));
+                dl->AddTriangleFilled(tip, notch, left,  IM_COL32(255, 120, 110, 255));
+                dl->AddTriangle(tip, right, left, IM_COL32(20, 20, 20, 220), 1.5f);
             }
         }
 

@@ -20,8 +20,14 @@ struct Config
     enum Anchor : int { TopLeft = 0, TopRight = 1, BottomLeft = 2, BottomRight = 3 };
     Anchor anchor        = BottomLeft;
 
+    // Zoom is stepped. 1.0 is fully zoomed out; the ceiling sits four steps in.
+    static constexpr float kZoomMin   = 3.0f;
+    static constexpr float kZoomStep  = 0.5f;
+    static constexpr int   kZoomSteps = 10;
+    static constexpr float kZoomMax   = kZoomMin + kZoomStep * kZoomSteps;
+
     // Visual behaviour.
-    float zoom           = 1.0f;   // 1.0 = fit, >1 zooms in
+    float zoom           = kZoomMin;
     float opacity        = 0.85f;
     bool  rotate_with_player = true;
     bool  show_player_arrow  = true;

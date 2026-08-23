@@ -4,6 +4,7 @@
 #include <windows.h>
 #include <shlwapi.h>
 
+#include <algorithm>
 #include <fstream>
 #include <nlohmann/json.hpp>
 
@@ -74,6 +75,10 @@ bool Config::LoadFromFile(const char* path)
     blips_png_path      = GetField<std::string>(j, "blips_png_path",   blips_png_path);
     max_capture_size_px = GetField(j, "max_capture_size_px", max_capture_size_px);
     draw_debug_window   = GetField(j, "draw_debug_window",   draw_debug_window);
+
+    // Clamp here rather than at the key handler so a hand-edited options.json
+    // cannot start the mod outside the stepped zoom range.
+    zoom = std::clamp(zoom, kZoomMin, kZoomMax);
 
     SM_INFO("Config loaded from '%s'.", path);
     return true;

@@ -49,7 +49,7 @@ REM Le dossier SnowMap/ (options.json) n'est pas copie pour ne pas ecraser la co
 
 echo ---------------------------------------------------
 echo [deploy] Succes ! Le mod et son proxy sont installes.
-echo [deploy] Logs: %GAME_BIN%\SnowMap\SnowMap.log
+echo [deploy] Logs: %LOCALAPPDATA%\SnowMap\SnowMap.log
 pause
 exit /b 0
 
