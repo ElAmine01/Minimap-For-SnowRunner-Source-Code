@@ -1,5 +1,5 @@
 #pragma once
-/// Small, thread-safe logger that writes to <gamedir>/SnowMap/SnowMap.log.
+/// Small, thread-safe logger that writes to %LOCALAPPDATA%\SnowMap\SnowMap.log.
 /// The game runs without a console, so we cannot rely on stdout.
 /// Keep it cheap: no formatting libs, just snprintf.
 
